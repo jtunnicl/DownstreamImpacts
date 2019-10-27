@@ -8,9 +8,9 @@ class Toolbox(object):
         self.label = "Trace Downstream Impacts"
         self.alias = ""
         # List of tool classes associated with this toolbox
-        self.tools = [DownstreamImpacts2]
+        self.tools = [DownstreamImpacts]
 
-class DownstreamImpacts2(object):
+class DownstreamImpacts(object):
     def __init__(self):
         """Define the tool (tool name is the name of the class)."""
         self.label = "Trace Downstream Impacts from Polygon"
@@ -151,6 +151,15 @@ class DownstreamImpacts2(object):
                 poly_index = int(row[0])
                 idx = 0
 
+                ## Arrays for collecting all coordinates and values along the trace route
+                steps = int(searchRadius * 0.4)   # Less than half the search radius, otherwise it can run off the domain
+                streamOrder = numpy.zeros(steps, dtype=numpy.float32)
+                runningDistance = numpy.zeros(steps, dtype=numpy.float32)
+                bedElev = numpy.zeros(steps, dtype=numpy.float32)
+                upstrArea = numpy.zeros(steps, dtype=numpy.float32)
+                nRow = numpy.zeros(steps)    
+                nCol = numpy.zeros(steps)
+
                 # Window sections of the raster and carry out tracing
                 try:
                     lowerLeft = arcpy.Point(CentrX - int((searchRadius/2)*dx), CentrY - int((searchRadius/2)*dx))
@@ -169,16 +178,8 @@ class DownstreamImpacts2(object):
                     ## Start point for tracing
                     nR = ans[0][maxValCoordinate]
                     nC = ans[1][maxValCoordinate]
-                    steps = int(searchRadius * 0.4)   # Less than half the search radius, otherwise it can run off the domain
                             # Note this can be problematic with quite large polygons, 
                             # where search origin is possibly much closer to bounds
-                    ## Arrays for collecting all coordinates and values along the trace route
-                    streamOrder = numpy.zeros(steps, dtype=numpy.float32)
-                    runningDistance = numpy.zeros(steps, dtype=numpy.float32)
-                    bedElev = numpy.zeros(steps, dtype=numpy.float32)
-                    upstrArea = numpy.zeros(steps, dtype=numpy.float32)
-                    nRow = numpy.zeros(steps)    
-                    nCol = numpy.zeros(steps)
                     nRow[0] = nR                 # initiate array of coordinates
                     nCol[0] = nC
                     if orderArray[nR,nC] == NoData: streamOrder[0] = 0    # Treat anything less than Order 1 as Order 'zero'
@@ -187,7 +188,6 @@ class DownstreamImpacts2(object):
                     runningDistance[0] = 0       # Initialise the first element of these arrays at the starting point
                     bedElev[0] = elevArray[nR, nC]
                     upstrArea[0] = faccArray[nR, nC]
-
                     for b in range(1,steps-1):
                         direction=dirArray[nR, nC]
                         if direction<1:break
@@ -238,7 +238,7 @@ class DownstreamImpacts2(object):
                             Xval = nCol[idx]
                         vertex = arcpy.Point( lowerLeft.X + ( Xval * dx ) + ( dx/2 ), lowerLeft.Y + ( ( dataRows - Yval ) * dx ) + ( dx/2 ) )
 
-                except:             # No evident path downslope, just place the point at the disturbance centroid, fields are zeros
+                except:  # No evident path downslope, just place the point at the disturbance centroid, fields are zeros
                     vertex = arcpy.Point(CentrX, CentrY)
                     pass
 

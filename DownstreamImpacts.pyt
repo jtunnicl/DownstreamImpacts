@@ -46,6 +46,7 @@ class DownstreamImpacts2(object):
             datatype="GPFeatureLayer",
             parameterType="Required",
             direction="Input")
+        slumpPolys.filter.list = ["Polygon"]
 
         slumpRaster = arcpy.Parameter(
             displayName="Disturbance Polygon Raster",
@@ -90,7 +91,6 @@ class DownstreamImpacts2(object):
             direction="Output")
 
         parameters = [searchRadius, depoGradient, slumpPolys, slumpRaster, elev, fdir, facc, order, newfile]
-
         return parameters
 
     def isLicensed(self):
@@ -105,9 +105,10 @@ class DownstreamImpacts2(object):
     def execute(self, parameters, messages):
 
         # Get the parameter 'values'
-        searchRadius = parameters[0]
+        searchRadius = int(parameters[0].valueAsText)
         depoGradient = parameters[1]
         slumpPolys = parameters[2].valueAsText
+        polyPath = (arcpy.Describe(slumpPolys).path + '\\' + arcpy.Describe(slumpPolys).name)
         slumpRaster = arcpy.Raster(parameters[3].valueAsText)
         elev = arcpy.Raster(parameters[4].valueAsText)
         fdir = arcpy.Raster(parameters[5].valueAsText)
@@ -125,13 +126,10 @@ class DownstreamImpacts2(object):
         NoData = arcpy.Describe(elev).noDataValue
 
         # Output files
-        arcpy.AddMessage('Input Raster Dataset path: %s' %os.path.dirname(newfile))
-        #arcpy.AddMessage('Input Raster Dataset name: %s' %os.path.split(newfile.name)[1])
-        arcpy.management.CreateFeatureclass(os.path.dirname(newfile),os.path.basename(newfile),"POINT","","DISABLED","DISABLED")
-        descData = arcpy.Describe(newfile)
-        arcpy.AddField_management(descData.name, "AccumArea", field_type="DOUBLE")
-        arcpy.AddField_management(descData.name, "DistFrmSrc", field_type="DOUBLE")
-        arcpy.AddField_management(descData.name, "StrmOrder", field_type="DOUBLE")
+        arcpy.management.CreateFeatureclass(os.path.dirname(newfile),os.path.basename(newfile),"POINT","","DISABLED","DISABLED", spatialRef)
+        arcpy.AddField_management(newfile, "AccumArea", field_type="DOUBLE")
+        arcpy.AddField_management(newfile, "DistFrmSrc", field_type="DOUBLE")
+        arcpy.AddField_management(newfile, "StrmOrder", field_type="DOUBLE")
 
 # Helper arrays for determining distances and routing, based on flow direction raster
 # Some of this technique borrowed from FelixIP
@@ -144,115 +142,110 @@ class DownstreamImpacts2(object):
         dRow=(0,  1,  1,  1,  0, -1, -1,-1)
 
 # loop through the polys
-        for row in arcpy.da.SearchCursor(slumpPolys, ["OID@", "SHAPE@"]):
-            offsetX = int((row[1].centroid.X - originX)/dx)   # Get the centroid point mapped onto the raster grid
-            CentrX = originX + offsetX * dx
-            offsetY = int((row[1].centroid.Y - originY)/dx)
-            CentrY = originY + offsetY * dx
-            poly_index = int(row[0])
+        with arcpy.da.SearchCursor(polyPath, ["OID@", "SHAPE@"]) as cursor:
+            for row in cursor:
+                offsetX = int((row[1].centroid.X - originX)/dx)   # Get the centroid point mapped onto the raster grid
+                CentrX = originX + offsetX * dx
+                offsetY = int((row[1].centroid.Y - originY)/dx)
+                CentrY = originY + offsetY * dx
+                poly_index = int(row[0])
+                idx = 0
 
-            # Window sections of the raster and carry out tracing
-            try:
-                lowerLeft = arcpy.Point(CentrX - int((searchRadius/2)*dx), CentrY - int((searchRadius/2)*dx))
-                # Turn rasters into Numpy Arrays
-                elevArray = arcpy.RasterToNumPyArray(elev,lowerLeft,searchRadius,searchRadius,NoData)
-                dirArray = arcpy.RasterToNumPyArray(fdir,lowerLeft,searchRadius,searchRadius,NoData)
-                faccArray = arcpy.RasterToNumPyArray(facc,lowerLeft,searchRadius,searchRadius,NoData)
-                slumpArray = arcpy.RasterToNumPyArray(slumpRaster,lowerLeft,searchRadius,searchRadius,NoData)
-                orderArray = arcpy.RasterToNumPyArray(order,lowerLeft,searchRadius,searchRadius,NoData)
-                dataRows = elevArray.shape[0] - 1
-                dataCols = elevArray.shape[1] -1
-                vals = faccArray[numpy.where(slumpArray == poly_index)]
-                ans = numpy.where(slumpArray == poly_index) #       two tuples with R, C coordinates within slump
-                maxVal = numpy.amax(faccArray[ans])
-                maxValCoordinate = numpy.where(faccArray[ans] == maxVal) [0][0] # Highest facc value within the slump polygon
-                
-                ## Start point for tracing
-                nR = ans[0][maxValCoordinate]   
-                nC = ans[1][maxValCoordinate]
-                steps = int(searchRadius * 0.4)   # Less than half the search radius, otherwise it can run off the domain
-                        # Note this can be problematic with quite large polygons, 
-                        # where search origin is possibly much closer to bounds
-                
-                ## Arrays for collecting all coordinates and values along the trace route
-                streamOrder = numpy.zeros(steps, dtype=numpy.float32)
-                runningDistance = numpy.zeros(steps, dtype=numpy.float32)
-                bedElev = numpy.zeros(steps, dtype=numpy.float32)
-                upstrArea = numpy.zeros(steps, dtype=numpy.float32)
-                nRow = numpy.zeros(steps)    
-                nCol = numpy.zeros(steps)
-                nRow[0] = nR                 # initiate array of coordinates
-                nCol[0] = nC
-                
-                if orderArray[nR,nC] < 1: streamOrder[0] = 0    # Treat anything less than Order 1 as Order 'zero'
-                else: streamOrder[0] = orderArray[nR,nC]
-                
-                runningDistance[0] = 0       # Initialise the first element of these arrays at the starting point
-                bedElev[0] = elevArray[nR, nC]
-                upstrArea[0] = faccArray[nR, nC]
-                
-                for b in range(1,steps):
-                    direction=dirArray[nR, nC]
-                    if direction<1:break
-                    i=fDirs.index(direction)
-                    dX=dCol[i]; nC+=dX
-                    if nCol[b]<0 or nCol[b]==dataCols: break
-                    dY=dRow[i]; nR+=dY
-                    if nRow[b]<0 or nRow[b]==dataRows: break
-                    nRow[b] = nR
-                    nCol[b] = nC
-                    if orderArray[nR,nC] < 0: streamOrder[b] = 0
-                    else: streamOrder[b] = orderArray[nR,nC]
-                
-                    runningDistance[b] = runningDistance[b-1] + numpy.any(fOrtho == direction)  * dx + numpy.any(fDiag == direction) * 1.4142 * dx
-                    bedElev[b] = elevArray[nR, nC]
-                    upstrArea[b] = faccArray[nR, nC]
-                
-                bump_coord = numpy.where(numpy.diff(streamOrder)>0)[0]   # point(s) where stream order changes; can be none, or more than one
-                
-                # Case where no junction shows up; give up and use a point shortly downstream of origin
-                if bump_coord.size == 0:
-                    idx = 5   # Deposition a short distance (5 cells) downslope of the polygon
-                    Yval = nRow[idx]
-                    Xval = nCol[idx]
-                    vertex = arcpy.Point( lowerLeft.X + ( Xval * dx ) + ( dx/2 ), lowerLeft.Y + ( ( dataRows - Yval ) * dx ) + ( dx/2 ) )
-                
-                # Case where there is only one junction in the whole path; deposition occurs at this transition
-                elif bump_coord.size == 1:
-                    idx = bump_coord[0] + 1   # +1 ensures point on path is placed beyond initial order, into the next
-                    Yval = nRow[idx]
-                    Xval = nCol[idx]
-                    vertex = arcpy.Point( lowerLeft.X + ( Xval * dx ) + ( dx/2 ), lowerLeft.Y + ( ( dataRows - Yval ) * dx ) + ( dx/2 ) )
-                
-                # Case with more than one junction; deposition may occur multiple links downstream, if first is steep enough
-                else:
-                    depo = 0
-                    #for c in range(0, bump_coord.size):
-                    while depo < bump_coord.size:          # 4 order transitions is the upper plausible limit
-                        # Estimate the slope between origin and the first junction
-                        idx = bump_coord[depo] + 1
-                        slope = (bedElev[0]- bedElev[idx]) / runningDistance[idx]
-                        if slope < depoGradient:   # slope is shallow enough for deposition
-                            Yval = nRow[idx]
-                            Xval = nCol[idx]
-                            break
-                        else:
-                            depo = depo + 1
-                
-                        idx = bump_coord[depo-1] + 1  # Give up, deposit on previous transition. All links are too steep for deposition. 
+                # Window sections of the raster and carry out tracing
+                try:
+                    lowerLeft = arcpy.Point(CentrX - int((searchRadius/2)*dx), CentrY - int((searchRadius/2)*dx))
+                    # Turn rasters into Numpy Arrays
+                    elevArray = arcpy.RasterToNumPyArray(elev,lowerLeft,searchRadius,searchRadius,NoData)
+                    dirArray = arcpy.RasterToNumPyArray(fdir,lowerLeft,searchRadius,searchRadius,NoData)
+                    faccArray = arcpy.RasterToNumPyArray(facc,lowerLeft,searchRadius,searchRadius,NoData)
+                    slumpArray = arcpy.RasterToNumPyArray(slumpRaster,lowerLeft,searchRadius,searchRadius,NoData)
+                    orderArray = arcpy.RasterToNumPyArray(order,lowerLeft,searchRadius,searchRadius,NoData)
+                    dataRows = elevArray.shape[0] - 1
+                    dataCols = elevArray.shape[1] -1
+                    vals = faccArray[numpy.where(slumpArray == poly_index)]
+                    ans = numpy.where(slumpArray == poly_index) #       two tuples with R, C coordinates within slump
+                    maxVal = numpy.amax(faccArray[ans])
+                    maxValCoordinate = numpy.where(faccArray[ans] == maxVal) [0][0] # Highest facc value within the slump polygon
+                    ## Start point for tracing
+                    nR = ans[0][maxValCoordinate]
+                    nC = ans[1][maxValCoordinate]
+                    steps = int(searchRadius * 0.4)   # Less than half the search radius, otherwise it can run off the domain
+                            # Note this can be problematic with quite large polygons, 
+                            # where search origin is possibly much closer to bounds
+                    ## Arrays for collecting all coordinates and values along the trace route
+                    streamOrder = numpy.zeros(steps, dtype=numpy.float32)
+                    runningDistance = numpy.zeros(steps, dtype=numpy.float32)
+                    bedElev = numpy.zeros(steps, dtype=numpy.float32)
+                    upstrArea = numpy.zeros(steps, dtype=numpy.float32)
+                    nRow = numpy.zeros(steps)    
+                    nCol = numpy.zeros(steps)
+                    nRow[0] = nR                 # initiate array of coordinates
+                    nCol[0] = nC
+                    if orderArray[nR,nC] == NoData: streamOrder[0] = 0    # Treat anything less than Order 1 as Order 'zero'
+                    else: streamOrder[0] = orderArray[nR,nC]
+
+                    runningDistance[0] = 0       # Initialise the first element of these arrays at the starting point
+                    bedElev[0] = elevArray[nR, nC]
+                    upstrArea[0] = faccArray[nR, nC]
+
+                    for b in range(1,steps-1):
+                        direction=dirArray[nR, nC]
+                        if direction<1:break
+                        i=fDirs.index(direction)
+                        dX=dCol[i]; nC+=dX
+                        if nCol[b]<0 or nCol[b]==dataCols: break
+                        dY=dRow[i]; nR+=dY
+                        if nRow[b]<0 or nRow[b]==dataRows: break
+                        nRow[b] = nR
+                        nCol[b] = nC
+                        if orderArray[nR,nC] == NoData: streamOrder[b] = 0
+                        else: streamOrder[b] = orderArray[nR,nC]
+                        runningDistance[b] = runningDistance[b-1] + numpy.any(fOrtho == direction)  * dx + numpy.any(fDiag == direction) * 1.4142 * dx
+                        bedElev[b] = elevArray[nR, nC]
+                        upstrArea[b] = faccArray[nR, nC]
+
+                    bump_coord = numpy.where(numpy.diff(streamOrder)>0)[0]   # point(s) where stream order changes; can be none, or more than one
+                    # Case where no junction shows up; give up and use a point shortly downstream of origin
+                    if bump_coord.size == 0:
+                        idx = 5   # Deposition a short distance (5 cells) downslope of the polygon
                         Yval = nRow[idx]
                         Xval = nCol[idx]
-                
-                    vertex = arcpy.Point( lowerLeft.X + ( Xval * dx ) + ( dx/2 ), lowerLeft.Y + ( ( dataRows - Yval ) * dx ) + ( dx/2 ) )
-                
-                with arcpy.da.InsertCursor(descData.name, ("SHAPE@", "AccumArea", "DistFrmSrc", "StrmOrder")) as cursor:
+                        vertex = arcpy.Point( lowerLeft.X + ( Xval * dx ) + ( dx/2 ), lowerLeft.Y + ( ( dataRows - Yval ) * dx ) + ( dx/2 ) )
+
+                    # Case where there is only one junction in the whole path; deposition occurs at this transition
+                    elif bump_coord.size == 1:
+                        idx = bump_coord[0] + 1   # +1 ensures point on path is placed beyond initial order, into the next
+                        Yval = nRow[idx]
+                        Xval = nCol[idx]
+                        vertex = arcpy.Point( lowerLeft.X + ( Xval * dx ) + ( dx/2 ), lowerLeft.Y + ( ( dataRows - Yval ) * dx ) + ( dx/2 ) )
+
+                    # Case with more than one junction; deposition may occur multiple links downstream, if first is steep enough
+                    else:
+                        depo = 0
+                        #for c in range(0, bump_coord.size):
+                        while depo < bump_coord.size:          # 4 order transitions is the upper plausible limit
+                            # Estimate the slope between origin and the first junction
+                            idx = bump_coord[depo] + 1
+                            slope = (bedElev[0]- bedElev[idx]) / runningDistance[idx]
+                            if slope < depoGradient:   # slope is shallow enough for deposition
+                                Yval = nRow[idx]
+                                Xval = nCol[idx]
+                                break
+                            else:
+                                depo = depo + 1
+                            idx = bump_coord[depo-1] + 1  # Give up, deposit on previous transition. All links are too steep for deposition. 
+                            Yval = nRow[idx]
+                            Xval = nCol[idx]
+                        vertex = arcpy.Point( lowerLeft.X + ( Xval * dx ) + ( dx/2 ), lowerLeft.Y + ( ( dataRows - Yval ) * dx ) + ( dx/2 ) )
+
+                except:             # No evident path downslope, just place the point at the disturbance centroid, fields are zeros
+                    vertex = arcpy.Point(CentrX, CentrY)
+                    pass
+
+                with arcpy.da.InsertCursor(newfile, ("SHAPE@", "AccumArea", "DistFrmSrc", "StrmOrder")) as cursor:
                     cursor.insertRow((vertex, upstrArea[idx], runningDistance[idx], streamOrder[idx]))
 
-            except:             # No evident path downslope, just place the point at the disturbance centroid, fields are zeros
-                vertex = arcpy.Point(CentrX, CentrY)
-                with arcpy.da.InsertCursor(descData.name, ("SHAPE@", "AccumArea", "DistFrmSrc", "StrmOrder")) as cursor:
-                    cursor.insertRow((vertex, 0, 0, 0))
-                pass
+                arcpy.AddMessage('Polygon ID %i' %poly_index + ', vertex x=%f' %vertex.X + ', y=%f' %vertex.Y )
 
         del cursor
 
